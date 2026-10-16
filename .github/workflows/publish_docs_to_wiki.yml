@@ -1,80 +1,51 @@
-# Based on script from https://github.com/orgs/community/discussions/25929
-
 name: Publish docs to Wiki
 
-# Trigger this action only if there are changes pushed to the docs/** directory under the main branch
 on:
   workflow_dispatch:
   push:
     paths:
-      - docs/** # This includes all sub folders
+      - docs/**
+      - .github/workflows/publish_docs_to_wiki.yml
     branches:
-      - main # This can be changed to any branch of your preference
+      - main
 
 permissions:
   contents: write
+
+concurrency:
+  group: publish-wiki
+  cancel-in-progress: false
 
 jobs:
   publish_docs_to_wiki:
     name: Publish docs to Wiki
     runs-on: ubuntu-latest
     steps:
-    - name: Check whether the Wiki repository exists
-      id: wiki
-      uses: actions/github-script@v7
-      with:
-        script: |
-          try {
-            await github.rest.repos.get({
-              owner: context.repo.owner,
-              repo: `${context.repo.repo}.wiki`,
-            });
-            core.setOutput('exists', 'true');
-          } catch (error) {
-            if (error.status === 404) {
-              core.notice('Wiki repository is not enabled; skipping Wiki publication.');
-              core.setOutput('exists', 'false');
-            } else {
-              throw error;
-            }
-          }
+      - name: Checkout documentation
+        uses: actions/checkout@v4
 
-    # Clone the wiki repository
-    - name: Checkout Wiki repository
-      if: steps.wiki.outputs.exists == 'true'
-      uses: actions/checkout@main
-      with:
-        repository: ${{ github.event.repository.owner.name }}/${{ github.event.repository.name }}.wiki
-        path: wiki_repo
+      # Wiki Git repositories do not have REST /repos/{owner}/{repo}.wiki
+      # endpoints. Clone the published Wiki's Git URL directly.
+      - name: Checkout Wiki
+        run: git clone "https://github.com/${GITHUB_REPOSITORY}.wiki.git" "$RUNNER_TEMP/wiki"
 
-    # Clone the main repository
-    - name: Checkout main repository
-      if: steps.wiki.outputs.exists == 'true'
-      uses: actions/checkout@main
-      with:
-        repository: ${{ github.event.repository.owner.name }}/${{ github.event.repository.name }}
-        path: splat_repo
-
-    - name: Get the new Wiki files
-      if: steps.wiki.outputs.exists == 'true'
-      run: |
-        rm wiki_repo/*.md
-        cp splat_repo/docs/* wiki_repo/
-
-    # `git log -1 --pretty=%aN` prints the current commit's author name
-    # `git log -1 --pretty=%aE` prints the current commit's author mail
-    - name: Stage new files
-      if: steps.wiki.outputs.exists == 'true'
-      run: |
-        git -C wiki_repo config user.name $(git -C splat_repo log -1 --pretty=%aN)
-        git -C wiki_repo config user.email $(git -C splat_repo log -1 --pretty=%aE)
-        git -C wiki_repo add .
-
-    # `git diff-index --quiet HEAD` returns non-zero if there are any changes.
-    # This allows to avoid making a commit/push if there are no changes to the Wiki files
-
-    # `git log -1 --pretty=%B` prints the current commit's message
-    - name: Push new files to the Wiki
-      if: steps.wiki.outputs.exists == 'true'
-      run: |
-        git -C wiki_repo diff-index --quiet HEAD || (git -C wiki_repo commit -m "$(git -C splat_repo log -1 --pretty=%B)" && git -C wiki_repo push)
+      - name: Publish documentation
+        env:
+          GH_TOKEN: ${{ secrets.WIKI_TOKEN || github.token }}
+        run: |
+          set -euo pipefail
+          wiki="$RUNNER_TEMP/wiki"
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          echo "::add-mask::$auth"
+          # Exercise authenticated receive-pack even when no docs changed.
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" -C "$wiki" push --dry-run origin HEAD
+          cp docs/*.md "$wiki/"
+          git -C "$wiki" add -- '*.md'
+          if git -C "$wiki" diff --cached --quiet; then
+            echo 'All tracked documentation already matches the Wiki.'
+            exit 0
+          fi
+          git -C "$wiki" config user.name 'github-actions[bot]'
+          git -C "$wiki" config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git -C "$wiki" commit -m "Publish docs from ${GITHUB_SHA}"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" -C "$wiki" push origin HEAD

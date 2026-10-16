@@ -10,13 +10,37 @@ on:
     branches:
       - main # This can be changed to any branch of your preference
 
+permissions:
+  contents: write
+
 jobs:
   publish_docs_to_wiki:
     name: Publish docs to Wiki
     runs-on: ubuntu-latest
     steps:
+    - name: Check whether the Wiki repository exists
+      id: wiki
+      uses: actions/github-script@v7
+      with:
+        script: |
+          try {
+            await github.rest.repos.get({
+              owner: context.repo.owner,
+              repo: `${context.repo.repo}.wiki`,
+            });
+            core.setOutput('exists', 'true');
+          } catch (error) {
+            if (error.status === 404) {
+              core.notice('Wiki repository is not enabled; skipping Wiki publication.');
+              core.setOutput('exists', 'false');
+            } else {
+              throw error;
+            }
+          }
+
     # Clone the wiki repository
     - name: Checkout Wiki repository
+      if: steps.wiki.outputs.exists == 'true'
       uses: actions/checkout@main
       with:
         repository: ${{ github.event.repository.owner.name }}/${{ github.event.repository.name }}.wiki
@@ -24,12 +48,14 @@ jobs:
 
     # Clone the main repository
     - name: Checkout main repository
+      if: steps.wiki.outputs.exists == 'true'
       uses: actions/checkout@main
       with:
         repository: ${{ github.event.repository.owner.name }}/${{ github.event.repository.name }}
         path: splat_repo
 
     - name: Get the new Wiki files
+      if: steps.wiki.outputs.exists == 'true'
       run: |
         rm wiki_repo/*.md
         cp splat_repo/docs/* wiki_repo/
@@ -37,6 +63,7 @@ jobs:
     # `git log -1 --pretty=%aN` prints the current commit's author name
     # `git log -1 --pretty=%aE` prints the current commit's author mail
     - name: Stage new files
+      if: steps.wiki.outputs.exists == 'true'
       run: |
         git -C wiki_repo config user.name $(git -C splat_repo log -1 --pretty=%aN)
         git -C wiki_repo config user.email $(git -C splat_repo log -1 --pretty=%aE)
@@ -47,5 +74,6 @@ jobs:
 
     # `git log -1 --pretty=%B` prints the current commit's message
     - name: Push new files to the Wiki
+      if: steps.wiki.outputs.exists == 'true'
       run: |
         git -C wiki_repo diff-index --quiet HEAD || (git -C wiki_repo commit -m "$(git -C splat_repo log -1 --pretty=%B)" && git -C wiki_repo push)
